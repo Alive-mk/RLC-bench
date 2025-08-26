@@ -1,0 +1,9 @@
+# 可选：如果你更喜欢用配置文件，也可以把这些变量写到环境变量里
+model: ${OPENAI_MODEL:-gpt-4o-mini}
+temperature: 0.2
+rag_top_k: 3
+lc_max_chars: 12000
+limit: 100
+split: "validation[:100]"
+embedding: "sentence-transformers/all-MiniLM-L6-v2"
+timeout: 60
