@@ -283,3 +283,6 @@ conda config --set solver libmamba
 
 ```
 
+------
+
+![image-20250830113259457](../../AppData/Roaming/Typora/typora-user-images/image-20250830113259457.png)
