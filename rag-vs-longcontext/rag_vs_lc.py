@@ -6,6 +6,7 @@ from datasets import load_dataset
 from sentence_transformers import SentenceTransformer
 import faiss
 from tqdm import tqdm
+from sentence_transformers import CrossEncoder
 
 # ========== 简单评测：EM / F1 ==========
 def normalize_text(s: str) -> str:
@@ -78,32 +79,59 @@ def load_hotpot_subset(split: str) -> List[QASample]:
     for ex in ds:
         qid = ex["id"]
         question = ex["question"]
-        answer = ex.get("answer","")
-        ctx = ex["context"]  # list of [title, sentences(list)]
+        answer = ex.get("answer", "")
+        ctx = ex["context"]  # 可能是 list，也可能是 dict{"title": [...], "sentences": [[...]]}
+
         paras = []
-        for title, sents in ctx:
-            para = " ".join(sents)
-            if para.strip():
-                paras.append((title, para))
+        if isinstance(ctx, dict):  # 新式：列式存储
+            titles = ctx.get("title", [])
+            sents_list = ctx.get("sentences", [])
+            for title, sents in zip(titles, sents_list):
+                para = " ".join(sents)
+                if para.strip():
+                    paras.append((title, para))
+        else:  # 旧式：[(title, [sentences]), ...]
+            for item in ctx:
+                # item 可能是 (title, [sentences]) 或 {"title":..., "sentences":[...]}
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    title, sents = item[0], item[1]
+                elif isinstance(item, dict):
+                    title, sents = item.get("title", ""), item.get("sentences", [])
+                else:
+                    continue
+                para = " ".join(sents)
+                if para.strip():
+                    paras.append((title, para))
+
         samples.append(QASample(qid=qid, question=question, answer=answer, passages=paras))
     return samples
 
+
 # ========== 检索器（每题在其自带段落内检索） ==========
 class PerSampleRetriever:
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+    def __init__(self, model_name="sentence-transformers/all-MiniLM-L6-v2",
+                 rerank_model=None, rerank_topn=40):
         self.embedder = SentenceTransformer(model_name)
+        self.ce = CrossEncoder(rerank_model) if rerank_model else None
+        self.rerank_topn = rerank_topn
 
-    def topk(self, passages: List[Tuple[str,str]], query: str, k: int=3):
-        if len(passages) <= k:
-            return passages
+    def topk(self, passages, query, k=3):
         texts = [p[1] for p in passages]
-        # 归一化后用内积近似余弦
-        q_emb = self.embedder.encode([query], normalize_embeddings=True)
-        p_emb = self.embedder.encode(texts, normalize_embeddings=True)
-        index = faiss.IndexFlatIP(p_emb.shape[1])
-        index.add(p_emb.astype("float32"))
-        D, I = index.search(q_emb.astype("float32"), k)
-        return [passages[i] for i in I[0].tolist()]
+        q = self.embedder.encode([query], normalize_embeddings=True)
+        P = self.embedder.encode(texts, normalize_embeddings=True)
+
+        import numpy as np, faiss
+        index = faiss.IndexFlatIP(P.shape[1]); index.add(P.astype("float32"))
+        topn = max(k, self.rerank_topn) if self.ce else k
+        D, I = index.search(q.astype("float32"), topn)
+        cand = [passages[i] for i in I[0].tolist()]
+
+        if self.ce:  # 二段rerank再挑k个
+            pairs = [(query, p) for _, p in cand]
+            scores = self.ce.predict(pairs)  # 越大越相关
+            order = np.argsort(-scores)[:k]
+            return [cand[i] for i in order]
+        return cand[:k]
 
 # ========== 提示模板 ==========
 def build_prompt_rag(question: str, ctxs: List[Tuple[str,str]]) -> str:
@@ -144,7 +172,10 @@ def run(method: str, limit: int, k: int, max_chars: int, model: str, temperature
     summ_path = out_dir / "summary.csv"
 
     client = get_openai_client()
-    retriever = PerSampleRetriever(embed_name)
+    #retriever = PerSampleRetriever(embed_name)
+    retriever = PerSampleRetriever(embed_name,
+                               rerank_model=os.getenv("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
+                               rerank_topn=int(os.getenv("RERANK_TOPN", "40")))
 
     # 数据：默认 HotpotQA 验证子集
     split = os.getenv("SPLIT", f"validation[:{limit}]")

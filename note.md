@@ -117,7 +117,7 @@ nano setup_openai.sh
 # 粘贴上面的内容，保存退出
 chmod +x setup_openai.sh
 
-./setup_openai.sh sk-XRmGDCzKp0OjU9kz5cC9110a56Ba4aEbBb9e7bB559C7Ef24 https://apix.ai-gaochao.cn gpt-4o-mini
+./setup_openai.sh sk-XRmGDCzKp0OjU9kz5cC9110a56Ba4aEbBb9e7bB559C7Ef24 https://api.ai-gaochao.cn/v1 gpt-4o-mini
 
 验证
 echo $OPENAI_API_KEY
@@ -286,3 +286,98 @@ conda config --set solver libmamba
 ------
 
 ![image-20250830113259457](../../AppData/Roaming/Typora/typora-user-images/image-20250830113259457.png)
+
+```
+method,limit,avg_em,avg_f1,avg_latency_ms,k_or_maxchars
+lc,100,0.0000,0.0001,628.6,12000
+method,limit,avg_em,avg_f1,avg_latency_ms,k_or_maxchars
+rag,100,0.0000,0.0001,648.0,3
+
+
+你这两行是两次跑出来的汇总：
+
+lc,100,0.0000,0.0001,628.6,12000   # 长上下文：跑了100条，EM≈0，F1≈0.0001，平均延迟≈629ms，上下文上限12000字符
+rag,100,0.0000,0.0001,648.0,3      # RAG：跑了100条，EM≈0，F1≈0.0001，平均延迟≈648ms，top-k=3
+
+
+意思：模型给出的答案几乎都没匹配到标准答案（要么答错、答整句、要么大量输出 unknown）。延迟 0.6s 也异常快，像是在迅速返回固定样式（例如一直 unknown）。
+```
+
+看看模型到底回答了啥（unknown 比例与样例）
+
+```
+# RAG 结果抽样+unknown占比
+python - <<'PY'
+import json,glob,random
+p=sorted(glob.glob('runs/*/rag.jsonl'))[-1]
+L=[json.loads(x) for x in open(p,encoding='utf-8')]
+u=sum(1 for d in L if d["pred"].strip().lower().startswith("unknown"))
+print(f"RAG unknown比例: {u}/{len(L)} = {u/len(L):.1%}")
+for d in random.sample(L,3):
+    print("\nQ:",d["question"]);print("PRED:",d["pred"]);print("GOLD:",d["gold"])
+PY
+
+# LC 同样看一下
+python - <<'PY'
+import json,glob,random
+p=sorted(glob.glob('runs/*/lc.jsonl'))[-1]
+L=[json.loads(x) for x in open(p,encoding='utf-8')]
+u=sum(1 for d in L if d["pred"].strip().lower().startswith("unknown"))
+print(f"LC unknown比例: {u}/{len(L)} = {u/len(L):.1%}")
+for d in random.sample(L,3):
+    print("\nQ:",d["question"]);print("PRED:",d["pred"]);print("GOLD:",d["gold"])
+PY
+
+确认我们确实把“上下文”塞进去了（不是空的）
+
+python - <<'PY'
+import json,glob
+p=sorted(glob.glob('runs/*/rag.jsonl'))[-1]
+L=[json.loads(x) for x in open(p,encoding='utf-8')]
+zero_ctx=sum(1 for d in L if d["ctx_chars"]==0 or d["num_ctx"]==0)
+print(f"RAG 空上下文样本: {zero_ctx}/{len(L)}")
+print("RAG 平均ctx长度:", sum(d["ctx_chars"] for d in L)//len(L))
+
+p=sorted(glob.glob('runs/*/lc.jsonl'))[-1]
+L=[json.loads(x) for x in open(p,encoding='utf-8')]
+zero_ctx=sum(1 for d in L if d["ctx_chars"]==0 or d["num_ctx"]==0)
+print(f"LC  空上下文样本: {zero_ctx}/{len(L)}")
+print("LC  平均ctx长度:", sum(d["ctx_chars"] for d in L)//len(L))
+PY
+
+快速验证接口真的在走 OpenAI 兼容 JSON（不是 404/HTML）
+
+curl -sS -H "Authorization: Bearer $OPENAI_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"model":"'"${OPENAI_MODEL:-gpt-4o-mini}"'","messages":[{"role":"user","content":"Say OK only."}]}' \
+     "$OPENAI_BASE_URL/chat/completions" | head -n 3
+期待是 JSON（以 { 开头）；
+
+如果看到 <html> 或 404，OPENAI_BASE_URL 还不对，必须用带 /v1 的真正接口（例如 https://.../v1）。
+```
+
+![image-20250831105256403](../../AppData/Roaming/Typora/typora-user-images/image-20250831105256403.png)
+
+这是在告诉你：**模型返回的不是答案，而是一整页网站的 404 HTML**。
+ 页面里有 “`<div class="title">404</div>` / `Powered by aapanel`”，说明你的请求打到了一个普通网站（或面板）而不是 OpenAI 兼容的 API。
+
+最常见原因：**`OPENAI_BASE_URL` 写错了，少了 `/v1`**。
+
+![image-20250831110053482](../../AppData/Roaming/Typora/typora-user-images/image-20250831110053482.png)
+
+```
+conda activate rlc-bench
+conda install -y -c conda-forge libstdcxx-ng=13.2.0 libgcc-ng=13.2.0 _openmp_mutex=4.5=2_gnu
+#（已经有也无妨，强制对齐到 13.x）
+
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+
+# 持久化（以后激活环境自动生效）
+mkdir -p "$CONDA_PREFIX/etc/conda/activate.d"
+printf 'export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"\n' \
+  > "$CONDA_PREFIX/etc/conda/activate.d/zzz_ld_path.sh"
+
+strings "$CONDA_PREFIX/lib/libstdc++.so.6" | grep GLIBCXX_3.4.30 || echo "missing"
+
+```
+

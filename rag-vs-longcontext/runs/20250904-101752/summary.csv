@@ -1,0 +1,2 @@
+method,limit,avg_em,avg_f1,avg_latency_ms,k_or_maxchars
+lc,100,0.3300,0.4790,1470.0,20000

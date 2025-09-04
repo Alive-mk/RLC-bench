@@ -1,8 +1,6 @@
 datasets
-faiss-cpu==1.8.0
 sentence-transformers
 openai>=1.0.0
-numpy
 tqdm
 PyYAML
 regex
